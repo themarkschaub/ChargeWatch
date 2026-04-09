@@ -333,6 +333,80 @@
     margin-top: 0.5rem;
     display: none;
   }
+
+  /* Activity Log */
+  .log-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.75rem;
+  }
+
+  .clear-btn {
+    background: transparent;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    font-size: 0.65rem;
+    padding: 0.3rem 0.7rem;
+    border-radius: 6px;
+  }
+  .clear-btn:hover { color: var(--red); border-color: var(--red); }
+
+  .log-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    max-height: 320px;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+
+  .log-entry {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    gap: 0.6rem;
+    align-items: start;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.5rem 0.75rem;
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    animation: fadeIn 0.2s ease;
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(-4px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  .log-time { color: var(--muted); white-space: nowrap; }
+  .log-name { color: var(--text); font-weight: 700; }
+  .log-detail { color: var(--muted); font-size: 0.63rem; margin-top: 0.1rem; }
+
+  .log-badge {
+    font-size: 0.6rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    padding: 0.2rem 0.5rem;
+    border-radius: 4px;
+    white-space: nowrap;
+    align-self: start;
+  }
+
+  .log-badge.available { background: #00ff8820; color: var(--green); border: 1px solid var(--green-dim); }
+  .log-badge.occupied  { background: #ff3b5c15; color: var(--red);   border: 1px solid #ff3b5c55; }
+  .log-badge.unknown   { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+  .log-badge.alert     { background: var(--green); color: #000; }
+
+  .log-empty {
+    text-align: center;
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    color: var(--muted);
+    padding: 1.2rem 0;
+  }
 </style>
 </head>
 <body>
@@ -389,6 +463,17 @@
   </div>
 </div>
 
+<!-- Activity Log -->
+<div class="card">
+  <div class="log-header">
+    <div class="card-title" style="margin-bottom:0">④ Activity Log</div>
+    <button class="clear-btn" onclick="clearLog()">Clear</button>
+  </div>
+  <div id="log-list" class="log-list">
+    <div class="log-empty">No checks yet — start monitoring to see the log</div>
+  </div>
+</div>
+
 <!-- How it works note -->
 <div class="card">
   <div class="card-title">ℹ️ How This Works</div>
@@ -405,6 +490,59 @@
 let stations = JSON.parse(localStorage.getItem('cw_stations') || '[]');
 let monitorInterval = null;
 let previousStates = {};
+let activityLog = JSON.parse(localStorage.getItem('cw_log') || '[]');
+
+// ─── Log ─────────────────────────────────────────────────────────────────────
+function addLogEntry(stationName, state, available, total, isAlert) {
+  const entry = {
+    time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+    date: new Date().toLocaleDateString([], { month: 'short', day: 'numeric' }),
+    stationName,
+    state,
+    available,
+    total,
+    isAlert: !!isAlert
+  };
+  activityLog.unshift(entry); // newest first
+  if (activityLog.length > 200) activityLog = activityLog.slice(0, 200);
+  localStorage.setItem('cw_log', JSON.stringify(activityLog));
+  renderLog();
+}
+
+function clearLog() {
+  activityLog = [];
+  localStorage.removeItem('cw_log');
+  renderLog();
+}
+
+function renderLog() {
+  const list = document.getElementById('log-list');
+  if (!activityLog.length) {
+    list.innerHTML = '<div class="log-empty">No checks yet — start monitoring to see the log</div>';
+    return;
+  }
+  list.innerHTML = activityLog.map(e => {
+    const badgeClass = e.isAlert ? 'alert' : e.state;
+    const badgeText  = e.isAlert ? '⚡ ALERT' :
+                       e.state === 'available' ? 'AVAILABLE' :
+                       e.state === 'occupied'  ? 'IN USE' : 'UNKNOWN';
+    const detail = e.state === 'available' ? `${e.available} of ${e.total} ports free` :
+                   e.state === 'occupied'  ? `${e.total} port${e.total !== 1 ? 's' : ''} all occupied` :
+                   'No status returned';
+    return `
+      <div class="log-entry">
+        <div>
+          <div class="log-time">${e.time}</div>
+          <div class="log-detail">${e.date}</div>
+        </div>
+        <div>
+          <div class="log-name">${e.stationName}</div>
+          <div class="log-detail">${detail}</div>
+        </div>
+        <div class="log-badge ${badgeClass}">${badgeText}</div>
+      </div>`;
+  }).join('');
+}
 
 // ─── Audio ───────────────────────────────────────────────────────────────────
 const AudioCtx = window.AudioContext || window.webkitAudioContext;
@@ -557,12 +695,16 @@ async function checkAll() {
 
     previousStates[s.id] = state;
     updateStationUI(s.id, state, result.available, result.total);
+    addLogEntry(s.name, state, result.available, result.total, false);
   }
 
   // Alert on newly available
   if (newlyAvailable.length > 0) {
     playAlert();
-    newlyAvailable.forEach(name => sendNotification(name));
+    newlyAvailable.forEach(name => {
+      sendNotification(name);
+      addLogEntry(name, 'available', 0, 0, true);
+    });
     const banner = document.getElementById('alert-banner');
     banner.style.display = 'block';
     banner.textContent = `⚡ ${newlyAvailable.join(', ')} — Charger Available! Go plug in!`;
@@ -606,6 +748,7 @@ function stopMonitoring() {
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 renderStations();
+renderLog();
 
 // Allow Enter key on inputs
 document.getElementById('station-id-input').addEventListener('keydown', e => {
