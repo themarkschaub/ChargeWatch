@@ -622,24 +622,10 @@ async function fetchStationStatus(plugshareId, debug) {
         if (station.outlets) {
           station.outlets.forEach(outlet => {
             total++;
-            const status = outlet.outlet_status ? outlet.outlet_status.status : null;
-            if (status === 1)      available++;
-            else if (status === 2) inUse++;
-            else if (status === 5) outOfOrder++;
-          });
-        }
-      });
-    }
-
-    if (total === 0 && data.plugs) {
-      data.plugs.forEach(plug => {
-        if (plug.outlets) {
-          plug.outlets.forEach(outlet => {
-            total++;
-            const status = outlet.outlet_status ? outlet.outlet_status.status : null;
-            if (status === 1)      available++;
-            else if (status === 2) inUse++;
-            else if (status === 5) outOfOrder++;
+            const status = outlet.status;
+            if (status === 'AVAILABLE')    available++;
+            else if (status === 'CHARGING') inUse++;
+            else if (status === 'OUTOFORDER') outOfOrder++;
           });
         }
       });
@@ -737,8 +723,10 @@ async function checkAll() {
       state = 'available';
       anyAvailable = true;
       if (prev !== 'available') newlyAvailable.push(s.name);
-    } else {
+    } else if (result.total > 0) {
       state = 'occupied';
+    } else {
+      state = 'unknown';
     }
 
     previousStates[s.id] = state;
