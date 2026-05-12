@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -454,6 +455,9 @@
     <button class="big-btn" onclick="startMonitoring()">▶ Start Monitoring</button>
     <button class="big-btn stop" onclick="stopMonitoring()">■ Stop</button>
   </div>
+  <div style="margin-top:0.75rem">
+    <button onclick="debugFetch()" style="background:transparent;color:var(--muted);border:1px solid var(--border);font-size:0.65rem;padding:0.4rem 0.8rem;width:100%">🔍 Show Raw API Response (debug)</button>
+  </div>
   <div class="status-bar">
     <span id="status-text">Not monitoring</span>
     <span id="last-check">—</span>
@@ -461,6 +465,15 @@
   <div id="notif-warning" class="notif-warning">
     ⚠ Notifications blocked. Click the lock icon in your browser to allow them.
   </div>
+</div>
+
+<!-- Debug Panel -->
+<div class="card" id="debug-card" style="display:none">
+  <div class="log-header">
+    <div class="card-title" style="margin-bottom:0">🔍 Raw API Response</div>
+    <button class="clear-btn" onclick="document.getElementById('debug-card').style.display='none'">Close</button>
+  </div>
+  <pre id="debug-output" style="font-family:var(--mono);font-size:0.6rem;color:var(--green-dim);white-space:pre-wrap;word-break:break-all;max-height:300px;overflow-y:auto;margin-top:0.5rem"></pre>
 </div>
 
 <!-- Activity Log -->
@@ -493,17 +506,19 @@ let previousStates = {};
 let activityLog = JSON.parse(localStorage.getItem('cw_log') || '[]');
 
 // ─── Log ─────────────────────────────────────────────────────────────────────
-function addLogEntry(stationName, state, available, total, isAlert) {
+function addLogEntry(stationName, state, available, total, inUse, outOfOrder, isAlert) {
   const entry = {
     time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
     date: new Date().toLocaleDateString([], { month: 'short', day: 'numeric' }),
     stationName,
     state,
-    available,
-    total,
+    available: available || 0,
+    inUse: inUse || 0,
+    outOfOrder: outOfOrder || 0,
+    total: total || 0,
     isAlert: !!isAlert
   };
-  activityLog.unshift(entry); // newest first
+  activityLog.unshift(entry);
   if (activityLog.length > 200) activityLog = activityLog.slice(0, 200);
   localStorage.setItem('cw_log', JSON.stringify(activityLog));
   renderLog();
@@ -526,9 +541,14 @@ function renderLog() {
     const badgeText  = e.isAlert ? '⚡ ALERT' :
                        e.state === 'available' ? 'AVAILABLE' :
                        e.state === 'occupied'  ? 'IN USE' : 'UNKNOWN';
-    const detail = e.state === 'available' ? `${e.available} of ${e.total} ports free` :
-                   e.state === 'occupied'  ? `${e.total} port${e.total !== 1 ? 's' : ''} all occupied` :
-                   'No status returned';
+    let detail = 'No status returned';
+    if (e.total > 0) {
+      const parts = [];
+      if (e.available > 0) parts.push(`${e.available} free`);
+      if (e.inUse > 0)     parts.push(`${e.inUse} in use`);
+      if (e.outOfOrder > 0) parts.push(`${e.outOfOrder} out of order`);
+      detail = `${e.total} ports — ` + (parts.length ? parts.join(', ') : 'all unknown');
+    }
     return `
       <div class="log-entry">
         <div>
@@ -583,33 +603,61 @@ function sendNotification(stationName) {
 }
 
 // ─── PlugShare fetch ──────────────────────────────────────────────────────────
-async function fetchStationStatus(plugshareId) {
-  // PlugShare's public location endpoint
-  const url = `https://api.plugshare.com/location/${plugshareId}`;
+async function fetchStationStatus(plugshareId, debug) {
+  const url = `https://plugshare-proxy.themarkschaub.workers.dev/?id=${plugshareId}`;
   try {
-    const resp = await fetch(url, {
-      headers: { 'Authorization': 'Basic d2ViX3YyOndlYl92Mg==' }
-    });
+    const resp = await fetch(url);
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const data = await resp.json();
 
-    // Parse outlet availability
-    let total = 0, available = 0;
+    if (debug) {
+      document.getElementById('debug-card').style.display = 'block';
+      document.getElementById('debug-output').textContent = JSON.stringify(data, null, 2);
+    }
+
+    let total = 0, available = 0, outOfOrder = 0, inUse = 0;
+
     if (data.stations) {
-      data.stations.forEach(s => {
-        if (s.outlets) {
-          s.outlets.forEach(o => {
+      data.stations.forEach(station => {
+        if (station.outlets) {
+          station.outlets.forEach(outlet => {
             total++;
-            // status: 1 = available, 2 = occupied, 3 = unknown
-            if (o.outlet_status && o.outlet_status.status === 1) available++;
+            const status = outlet.outlet_status ? outlet.outlet_status.status : null;
+            if (status === 1)      available++;
+            else if (status === 2) inUse++;
+            else if (status === 5) outOfOrder++;
           });
         }
       });
     }
-    return { ok: true, available, total };
+
+    if (total === 0 && data.plugs) {
+      data.plugs.forEach(plug => {
+        if (plug.outlets) {
+          plug.outlets.forEach(outlet => {
+            total++;
+            const status = outlet.outlet_status ? outlet.outlet_status.status : null;
+            if (status === 1)      available++;
+            else if (status === 2) inUse++;
+            else if (status === 5) outOfOrder++;
+          });
+        }
+      });
+    }
+
+    return { ok: true, available, inUse, outOfOrder, total };
   } catch (e) {
-    return { ok: false, available: 0, total: 0, error: e.message };
+    if (debug) {
+      document.getElementById('debug-card').style.display = 'block';
+      document.getElementById('debug-output').textContent = 'Error: ' + e.message;
+    }
+    return { ok: false, available: 0, inUse: 0, outOfOrder: 0, total: 0, error: e.message };
   }
+}
+
+async function debugFetch() {
+  if (!stations.length) { alert('Add a station first.'); return; }
+  await fetchStationStatus(stations[0].id, true);
 }
 
 // ─── Stations UI ─────────────────────────────────────────────────────────────
@@ -660,14 +708,14 @@ function renderStations() {
   }).join('');
 }
 
-function updateStationUI(id, state, available, total) {
+function updateStationUI(id, state, available, total, outOfOrder) {
   const item = document.getElementById('item-' + id);
   if (!item) return;
   item.className = 'station-item ' + state;
   const label = item.querySelector('.station-status-label');
   if (label) {
     label.textContent = state === 'available' ? `${available}/${total} Free` :
-                        state === 'occupied'  ? 'In Use' : 'Unknown';
+                        state === 'occupied'  ? `0/${total} Free` : 'Unknown';
   }
 }
 
@@ -694,8 +742,8 @@ async function checkAll() {
     }
 
     previousStates[s.id] = state;
-    updateStationUI(s.id, state, result.available, result.total);
-    addLogEntry(s.name, state, result.available, result.total, false);
+    updateStationUI(s.id, state, result.available, result.total, result.outOfOrder);
+    addLogEntry(s.name, state, result.available, result.total, result.inUse, result.outOfOrder, false);
   }
 
   // Alert on newly available
@@ -703,7 +751,7 @@ async function checkAll() {
     playAlert();
     newlyAvailable.forEach(name => {
       sendNotification(name);
-      addLogEntry(name, 'available', 0, 0, true);
+      addLogEntry(name, 'available', 0, 0, 0, 0, true);
     });
     const banner = document.getElementById('alert-banner');
     banner.style.display = 'block';
